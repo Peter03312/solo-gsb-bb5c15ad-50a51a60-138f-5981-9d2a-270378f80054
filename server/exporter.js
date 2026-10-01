@@ -145,4 +145,26 @@ function buildComparisonCsv(view) {
   return '﻿' + rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
 }
 
-module.exports = { buildReportCsv, buildCombinedCsv, buildComparisonCsv, streamZip };
+// 视野统计 CSV：与报告页展示同一冻结结果（由 server/fields.buildFieldStats 生成）。
+// 未定标时面积/密度/计入细胞净面积总和列写「待定标」；旧报告无视野时列出空提示行。
+// 说明：本 CSV 为视野统计专用；原测量 CSV（buildReportCsv）保持原义不变。
+function buildFieldsCsv(statsView, reportMeta) {
+  const rows = [];
+  const push = (r) => rows.push(r);
+
+  push(['报告ID', reportMeta.id, '报告标题', reportMeta.title, '冻结草稿版本', `v${reportMeta.draftVersion}`]);
+  push(['发布时间', reportMeta.createdAt, '图片文件名', reportMeta.filename, '', '']);
+  push([]);
+
+  push(['视野名称', '孔洞数', '净面积(mm²)', '细胞数', '细胞密度(个/mm²)', '计入细胞净面积总和(mm²)']);
+  if (!statsView.fields.length) {
+    push(['（无取样视野：旧报告按空视野列表读取）']);
+  }
+  for (const f of statsView.fields) {
+    push([f.name, f.holes, f.netAreaText, f.cellCount, f.densityText, f.countedCellAreaText]);
+  }
+
+  return '﻿' + rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
+}
+
+module.exports = { buildReportCsv, buildCombinedCsv, buildComparisonCsv, buildFieldsCsv, streamZip };

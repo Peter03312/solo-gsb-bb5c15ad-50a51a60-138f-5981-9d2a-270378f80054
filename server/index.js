@@ -10,8 +10,9 @@ const sharp = require('sharp');
 const { initDb } = require('./db');
 const geo = require('./geometry');
 const cmp = require('./compare');
+const fieldsStat = require('./fields');
 const { renderAnnotatedPng } = require('./render');
-const { buildReportCsv, buildCombinedCsv, buildComparisonCsv, streamZip } = require('./exporter');
+const { buildReportCsv, buildCombinedCsv, buildComparisonCsv, buildFieldsCsv, streamZip } = require('./exporter');
 
 const DATA_DIR = process.env.DATA_DIR || path.join(__dirname, '..', 'data');
 const PORT = parseInt(process.env.PORT || '8080', 10);
@@ -33,15 +34,26 @@ function getImageOr404(id) {
   return hydrateImage(row);
 }
 
+function parseFieldsJson(raw) {
+  // 旧记录可能没有该列（NULL）——按空视野列表读取
+  if (raw === null || raw === undefined || raw === '') return [];
+  return JSON.parse(raw);
+}
+
 function hydrateImage(row) {
+  const calib = row.calib ? JSON.parse(row.calib) : null;
+  const cells = JSON.parse(row.cells);
+  const fields = parseFieldsJson(row.fields);
   return {
     id: row.id,
     filename: row.filename,
     width: row.width,
     height: row.height,
     version: row.version,
-    calib: row.calib ? JSON.parse(row.calib) : null,
-    cells: JSON.parse(row.cells),
+    calib,
+    cells,
+    fields,
+    fieldStats: fieldsStat.buildFieldStats(fields, cells, calib),
     published: !!row.published,
     createdAt: row.created_at,
     updatedAt: row.updated_at
@@ -49,6 +61,9 @@ function hydrateImage(row) {
 }
 
 function hydrateReport(row) {
+  const calib = JSON.parse(row.calib);
+  const cells = JSON.parse(row.cells);
+  const fields = parseFieldsJson(row.fields);
   return {
     id: row.id,
     imageId: row.image_id,
@@ -57,8 +72,11 @@ function hydrateReport(row) {
     filename: row.filename,
     width: row.width,
     height: row.height,
-    calib: JSON.parse(row.calib),
-    cells: JSON.parse(row.cells),
+    calib,
+    cells,
+    fields,
+    // 冻结结果：只取发布当时的 calib/cells/fields，页面与视野 CSV 共用
+    fieldStats: fieldsStat.buildFieldStats(fields, cells, calib),
     createdAt: row.created_at
   };
 }
@@ -233,6 +251,43 @@ app.put('/api/images/:id/contours', (req, res) => {
   res.json(getImageOr404(img.id));
 });
 
+// ---------- 取样视野（整批替换，任一视野非法则整次不生效） ----------
+
+app.put('/api/images/:id/fields', (req, res) => {
+  const img = getImageOr404(req.params.id);
+  if (!img) return res.status(404).json({ error: '图片不存在' });
+  if (!checkVersion(img, req.body.version)) {
+    return res.status(409).json({ error: `草稿已过期：你携带的版本为 ${req.body.version}，当前版本为 ${img.version}，请刷新后重试`, currentVersion: img.version });
+  }
+
+  const rawFields = req.body.fields;
+  if (!Array.isArray(rawFields)) return badRequest(res, '视野数据无效：fields 必须是数组');
+
+  let next;
+  try {
+    // 先全部校验：越界/自交/孔洞不严格位于外环内/孔洞彼此接触重叠/净面积非正
+    // 任一不满足都抛出，数据库不发生任何写入（整批拒绝）。
+    next = rawFields.map((f, i) => {
+      if (!f || typeof f !== 'object') throw new Error(`第 ${i + 1} 个视野数据格式错误`);
+      const { outer, holes } = geo.validateField({ ...f, _seq: i + 1 }, img.width, img.height);
+      const name = typeof f.name === 'string' ? f.name.trim().slice(0, 50) : '';
+      return {
+        id: typeof f.id === 'string' && f.id ? f.id : crypto.randomUUID(),
+        name,
+        outer: outer.map(roundPoint),
+        holes: holes.map((h) => h.map(roundPoint))
+      };
+    });
+  } catch (e) {
+    return badRequest(res, e.message);
+  }
+
+  db.prepare(`UPDATE images SET fields = ?, version = version + 1,
+              updated_at = datetime('now') WHERE id = ?`)
+    .run(JSON.stringify(next), img.id);
+  res.json(getImageOr404(img.id));
+});
+
 // ---------- 发布（乐观并发：携带读取时草稿版本） ----------
 
 app.post('/api/images/:id/publish', (req, res) => {
@@ -261,10 +316,11 @@ app.post('/api/images/:id/publish', (req, res) => {
   try {
     const tx = db.transaction(() => {
       db.prepare(`INSERT INTO reports
-                  (id, image_id, draft_version, title, filename, snapshot_name, width, height, calib, cells)
-                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+                  (id, image_id, draft_version, title, filename, snapshot_name, width, height, calib, cells, fields)
+                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
         .run(reportId, img.id, img.version, title, img.filename, snapName,
-             img.width, img.height, JSON.stringify(img.calib), JSON.stringify(img.cells));
+             img.width, img.height, JSON.stringify(img.calib), JSON.stringify(img.cells),
+             JSON.stringify(img.fields || []));
       db.prepare(`UPDATE images SET published = 1, version = version + 1,
                   updated_at = datetime('now') WHERE id = ?`).run(img.id);
     });
@@ -326,6 +382,15 @@ app.get('/api/reports/:id/csv', (req, res) => {
   res.setHeader('Content-Type', 'text/csv; charset=utf-8');
   res.setHeader('Content-Disposition', `attachment; filename="${report.id}_measurements.csv"`);
   res.send(buildReportCsv(report));
+});
+
+// 视野统计 CSV：与报告页展示的 fieldStats 为同一份冻结结果（原测量 CSV 保持原义）
+app.get('/api/reports/:id/fields-csv', (req, res) => {
+  const report = getReportOr404(req.params.id);
+  if (!report) return res.status(404).json({ error: '报告不存在' });
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', `attachment; filename="${report.id}_fields.csv"`);
+  res.send(buildFieldsCsv(report.fieldStats, report));
 });
 
 // 多份选定报告导出：{ ids: string[], format: 'csv' | 'png' | 'zip' }

@@ -36,6 +36,16 @@ function pointOnSegment(px, py, ax, ay, bx, by) {
   );
 }
 
+// 点是否落在环的任意一条边上（含端点）
+function pointOnRing(p, poly) {
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % poly.length];
+    if (pointOnSegment(p.x, p.y, a.x, a.y, b.x, b.y)) return true;
+  }
+  return false;
+}
+
 // 两线段是否在任何点接触（端点相接、交叉、共线重叠都算接触）
 function segmentsTouch(a, b, c, d) {
   const o1 = cross(a.x, a.y, b.x, b.y, c.x, c.y);
@@ -144,14 +154,19 @@ function pointsInsideImage(poly, width, height) {
   return null;
 }
 
-function shoelaceArea(poly) {
+// 带符号鞋带面积（逆时针为正）
+function signedArea(poly) {
   let s = 0;
   for (let i = 0; i < poly.length; i++) {
     const a = poly[i];
     const b = poly[(i + 1) % poly.length];
     s += a.x * b.y - b.x * a.y;
   }
-  return Math.abs(s) / 2;
+  return s / 2;
+}
+
+function shoelaceArea(poly) {
+  return Math.abs(signedArea(poly));
 }
 
 function perimeter(poly) {
@@ -164,27 +179,80 @@ function perimeter(poly) {
   return p;
 }
 
-// 校验一个细胞：外轮廓合法、孔洞合法且彼此不接触。
-// 返回 {outer, holes}（已标准化）；不合法抛出带细胞名的 Error。
-function validateCell(cell, width, height) {
-  const label = cell.name ? `细胞「${cell.name}」` : `第 ${cell._seq} 个细胞`;
-  const outer = parsePoints(cell.outer, `${label} 的外轮廓`);
+// 单个环的质心（标准多边形质心公式），返回 {x, y, areaSigned}；退化零面积环返回 null
+function ringCentroid(poly) {
+  let twiceArea = 0;
+  let cx = 0;
+  let cy = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % poly.length];
+    const f = a.x * b.y - b.x * a.y;
+    twiceArea += f;
+    cx += (a.x + b.x) * f;
+    cy += (a.y + b.y) * f;
+  }
+  if (Math.abs(twiceArea) <= EPS * EPS) return null;
+  return { x: cx / (3 * twiceArea), y: cy / (3 * twiceArea), areaSigned: twiceArea / 2 };
+}
+
+// 扣除孔洞后的净区域质心与净面积（孔洞按面积加权扣减，与环的绕向无关）。
+// 净面积非正时返回 null（净面积为零的细胞/视野不参与统计）。
+function regionCentroid(outer, holes) {
+  const oc = ringCentroid(outer);
+  if (!oc) return null;
+  const outerArea = Math.abs(oc.areaSigned);
+  let netArea = outerArea;
+  let mx = oc.x * outerArea;
+  let my = oc.y * outerArea;
+  for (const h of holes || []) {
+    const hc = ringCentroid(h);
+    if (!hc) continue;
+    const ha = Math.abs(hc.areaSigned);
+    netArea -= ha;
+    mx -= hc.x * ha;
+    my -= hc.y * ha;
+  }
+  if (!(netArea > EPS)) return null;
+  return { x: mx / netArea, y: my / netArea, areaPx: netArea };
+}
+
+// 点是否严格位于「外环 − 孔洞」的净区域内：
+// 严格在外环内，且不在任何孔洞内部、不压任何孔洞边界（外环边界同样不计入）。
+function pointInRegion(p, outer, holes) {
+  if (!pointStrictlyInside(p, outer)) return false;
+  for (const h of holes || []) {
+    if (pointStrictlyInside(p, h)) return false;
+    if (pointOnRing(p, h)) return false;
+  }
+  return true;
+}
+
+// ---------- 区域（细胞外轮廓+孔洞 / 视野外环+孔洞）通用校验 ----------
+// opts:
+//   label        对象全名（如「细胞「x」」「第 1 个视野」）
+//   ringWord     外环叫法：'外轮廓' | '外环'
+//   holeInsideMsg(hlab) 孔洞未严格位于外环内时的完整错误信息
+//   requirePositiveNet 是否额外要求净面积严格为正（视野需要）
+function validateRegion(region, width, height, opts) {
+  const { label, ringWord, holeInsideMsg } = opts;
+  const outer = parsePoints(region.outer, `${label} 的${ringWord}`);
 
   const dup = duplicateConsecutivePoint(outer);
-  if (dup) throw new Error(`${label}：外轮廓第 ${dup} 个点与下一点重复`);
+  if (dup) throw new Error(`${label}：${ringWord}第 ${dup} 个点与下一点重复`);
 
   const out = pointsInsideImage(outer, width, height);
   if (out) {
     throw new Error(
-      `${label}：外轮廓第 ${out.index} 个顶点 (${out.p.x.toFixed(1)}, ${out.p.y.toFixed(1)}) 越出图片范围（${width}×${height} 像素）`
+      `${label}：${ringWord}第 ${out.index} 个顶点 (${out.p.x.toFixed(1)}, ${out.p.y.toFixed(1)}) 越出图片范围（${width}×${height} 像素）`
     );
   }
 
   const hit = selfIntersection(outer);
-  if (hit) throw new Error(`${label}：外轮廓第 ${hit.edge[0]}、${hit.edge[1]} 条边${hit.where}，轮廓不得自交`);
+  if (hit) throw new Error(`${label}：${ringWord}第 ${hit.edge[0]}、${hit.edge[1]} 条边${hit.where}，${ringWord}不得自交`);
 
-  if (!Array.isArray(cell.holes)) cell.holes = [];
-  const holes = cell.holes.map((h, hi) => parsePoints(h, `${label} 的孔洞 ${hi + 1}`));
+  if (!Array.isArray(region.holes)) region.holes = [];
+  const holes = region.holes.map((h, hi) => parsePoints(h, `${label} 的孔洞 ${hi + 1}`));
 
   holes.forEach((hole, hi) => {
     const hlabel = `${label} 的孔洞 ${hi + 1}`;
@@ -198,11 +266,11 @@ function validateCell(cell, width, height) {
     if (si) throw new Error(`${hlabel}：第 ${si.edge[0]}、${si.edge[1]} 条边${si.where}，孔洞不得自交`);
 
     if (!ringStrictlyInside(hole, outer)) {
-      throw new Error(`${hlabel}：必须严格位于所属细胞外轮廓内部，且不能与外轮廓接触`);
+      throw new Error(holeInsideMsg(hlabel));
     }
   });
 
-  // 同细胞内的孔洞彼此不得接触（边界也不许），也不允许包含关系下的边接触；
+  // 同区域内的孔洞彼此不得接触（边界也不许），也不允许包含关系下的边接触；
   // 边互不接触 + 顶点严格在内的组合足以排除重叠/接触。
   for (let i = 0; i < holes.length; i++) {
     for (let j = i + 1; j < holes.length; j++) {
@@ -225,7 +293,36 @@ function validateCell(cell, width, height) {
     }
   }
 
+  if (opts.requirePositiveNet) {
+    const netArea = shoelaceArea(outer) - holes.reduce((s, h) => s + shoelaceArea(h), 0);
+    if (!(netArea > EPS)) {
+      throw new Error(`${label}：净面积非正（${ringWord} 扣除孔洞后的面积必须大于 0）`);
+    }
+  }
+
   return { outer, holes };
+}
+
+// 校验一个细胞：外轮廓合法、孔洞合法且彼此不接触。
+// 返回 {outer, holes}（已标准化）；不合法抛出带细胞名的 Error。
+function validateCell(cell, width, height) {
+  const label = cell.name ? `细胞「${cell.name}」` : `第 ${cell._seq} 个细胞`;
+  return validateRegion(cell, width, height, {
+    label,
+    ringWord: '外轮廓',
+    holeInsideMsg: (hlabel) => `${hlabel}：必须严格位于所属细胞外轮廓内部，且不能与外轮廓接触`
+  });
+}
+
+// 校验一个取样视野：外环合法、孔洞严格位于外环内且彼此不接触、净面积严格为正。
+function validateField(field, width, height) {
+  const label = field.name ? `视野「${field.name}」` : `第 ${field._seq} 个视野`;
+  return validateRegion(field, width, height, {
+    label,
+    ringWord: '外环',
+    holeInsideMsg: (hlabel) => `${hlabel}：必须严格位于所属视野外环内部，且不能与外环接触`,
+    requirePositiveNet: true
+  });
 }
 
 // scale: 每像素对应的微米数
@@ -241,8 +338,15 @@ function measureCell(outer, holes, scale) {
 module.exports = {
   parsePoints,
   validateCell,
+  validateField,
+  validateRegion,
   measureCell,
+  signedArea,
   shoelaceArea,
   perimeter,
+  ringCentroid,
+  regionCentroid,
+  pointInRegion,
+  pointOnRing,
   ringStrictlyInside
 };

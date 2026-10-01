@@ -51,7 +51,8 @@ const App = {
       const sub = document.createElement('div');
       sub.className = 'sub';
       const scale = im.calib ? ` · 1 px = ${im.calib.scale.toFixed(6)} μm` : ' · <span style="color:var(--warn)">未定标</span>';
-      sub.innerHTML = `${im.width}×${im.height} px · 草稿 v${im.version} · 细胞 ${im.cells.length} 个${scale} · 上传于 ${im.createdAt}`;
+      const fieldCount = Array.isArray(im.fields) ? im.fields.length : 0;
+      sub.innerHTML = `${im.width}×${im.height} px · 草稿 v${im.version} · 细胞 ${im.cells.length} 个 · 视野 ${fieldCount} 个${scale} · 上传于 ${im.createdAt}`;
       meta.appendChild(sub);
       item.appendChild(meta);
 

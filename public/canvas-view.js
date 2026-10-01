@@ -9,6 +9,13 @@ const CELL_COLORS = [
   '#00bcd4', '#e91e63', '#8bc34a', '#5c6bc0', '#ff7043'
 ];
 
+// 取样视野配色：外环青色实线、孔洞紫色虚线（与细胞层区分）
+const FIELD_COLORS = [
+  '#00e5ff', '#7c93ff', '#3ad29f', '#c792ea', '#80d8ff',
+  '#84ffff', '#b388ff', '#64ffda', '#40c4ff', '#a7f3d0'
+];
+const FIELD_HOLE_COLOR = '#c792ea';
+
 class CanvasView {
   constructor(canvas, callbacks = {}) {
     this.canvas = canvas;
@@ -137,7 +144,7 @@ class CanvasView {
       this.cb.onCalibPoint && this.cb.onCalibPoint(pt);
       return;
     }
-    if (this.tool === 'cell' || this.tool === 'hole') {
+    if (this.tool === 'cell' || this.tool === 'hole' || this.tool === 'field' || this.tool === 'field-hole') {
       const st = this.getState();
       const ring = st.drawing;
       // 点击靠近起点且已有 3 点：闭合完成，不新增重复点
@@ -177,7 +184,7 @@ class CanvasView {
 
   onDblClick(e) {
     if (this.readOnly) return;
-    if (this.tool !== 'cell' && this.tool !== 'hole') return;
+    if (!['cell', 'hole', 'field', 'field-hole'].includes(this.tool)) return;
     const st = this.getState();
     if (st.drawing && st.drawing.points.length >= 3) {
       e.preventDefault();
@@ -210,6 +217,23 @@ class CanvasView {
     ctx.strokeRect(0, 0, this.natW, this.natH);
 
     const st = this.getState();
+
+    // 取样视野层（先画，压在细胞层之下）
+    const fields = st.fields || [];
+    fields.forEach((field, i) => {
+      const color = FIELD_COLORS[i % FIELD_COLORS.length];
+      const active = field.id === st.activeFieldId;
+      this.drawPolygon(ctx, field.outer, {
+        fill: color, stroke: color,
+        width: (active ? 3.2 : 2.2) / this.k, active: false
+      });
+      (field.holes || []).forEach((h) => this.drawPolygon(ctx, h, {
+        stroke: FIELD_HOLE_COLOR, dash: [8 / this.k, 5 / this.k],
+        width: 2 / this.k, fill: FIELD_HOLE_COLOR
+      }));
+      this.drawFieldLabel(ctx, field, i, color, active);
+    });
+
     const cells = st.cells || [];
     cells.forEach((cell, i) => this.drawPolygon(ctx, cell.outer, {
       fill: CELL_COLORS[i % CELL_COLORS.length],
@@ -225,8 +249,12 @@ class CanvasView {
 
     // 正在绘制的环
     if (st.drawing) {
-      const isHole = st.drawing.kind === 'hole';
-      this.drawDraftRing(ctx, st.drawing.points, isHole ? '#ff1744' : '#00ff9c');
+      const kind = st.drawing.kind;
+      const isHole = kind === 'hole' || kind === 'field-hole';
+      const color = kind === 'field' ? '#00e5ff'
+        : kind === 'field-hole' ? FIELD_HOLE_COLOR
+        : isHole ? '#ff1744' : '#00ff9c';
+      this.drawDraftRing(ctx, st.drawing.points, color);
     }
 
     // 标尺：优先显示正在放置的草稿点，否则显示已保存标定
@@ -234,6 +262,30 @@ class CanvasView {
     if (calib && calib.length) this.drawCalib(ctx, calib);
 
     this.cb.onZoom && this.cb.onZoom(this.k);
+  }
+
+  drawFieldLabel(ctx, field, i, color, active) {
+    // 视野名标签放在外环顶点中偏左上的顶点处
+    const anchor = field.outer[0] || { x: 0, y: 0 };
+    const fs = Math.max(13, 14 / this.k);
+    const name = (field.name && field.name.trim()) || `视野 ${i + 1}`;
+    ctx.font = `bold ${fs}px sans-serif`;
+    const pad = 5 / this.k;
+    const w = ctx.measureText(name).width + pad * 2;
+    const h = fs + pad;
+    const x = anchor.x + 4 / this.k;
+    const y = anchor.y - h - 3 / this.k;
+    ctx.beginPath();
+    ctx.fillStyle = 'rgba(8,18,22,.82)';
+    ctx.rect(x, y, w, h);
+    ctx.fill();
+    ctx.lineWidth = 1.2 / this.k;
+    ctx.strokeStyle = active ? '#ffffff' : color;
+    ctx.stroke();
+    ctx.fillStyle = color;
+    ctx.textBaseline = 'middle';
+    ctx.fillText(name, x + pad, y + h / 2 + 0.5 / this.k);
+    ctx.textBaseline = 'alphabetic';
   }
 
   drawPolygon(ctx, poly, opt) {

@@ -151,6 +151,7 @@ table.measure th, table.measure td {
 table.measure th { background: var(--panel2); color: var(--muted); font-weight: 600; }
 table.measure td:first-child, table.measure th:first-child { text-align: left; }
 table.measure tr:nth-child(even) td { background: rgba(255,255,255,.02); }
+table.measure td.pending { color: var(--warn); }
 
 /* 复选框列表项 */
 .item label.main { display: flex; align-items: center; gap: 14px; flex: 1; cursor: pointer; min-width: 0; }

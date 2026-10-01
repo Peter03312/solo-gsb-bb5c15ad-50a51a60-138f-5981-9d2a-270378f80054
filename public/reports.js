@@ -123,10 +123,16 @@ const Reports = {
         <tbody>${rows}</tbody>
       </table>`;
 
+    // 取样视野细胞密度统计：与视野统计 CSV 为同一冻结结果
+    document.getElementById('rp-fields-wrap').innerHTML = this.fieldStatsHtml(r);
+
     document.getElementById('rp-png-link').href = API.exportPngUrl(r.id);
     document.getElementById('rp-png-link').setAttribute('download', `${r.id}_annotated.png`);
     document.getElementById('rp-csv-link').href = API.exportCsvUrl(r.id);
     document.getElementById('rp-csv-link').setAttribute('download', `${r.id}_measurements.csv`);
+    const fcsv = document.getElementById('rp-fields-csv-link');
+    fcsv.href = API.exportFieldsCsvUrl(r.id);
+    fcsv.setAttribute('download', `${r.id}_fields.csv`);
 
     if (!this.detailView) {
       this.detailView = new CanvasView(document.getElementById('report-canvas'), {
@@ -134,10 +140,40 @@ const Reports = {
       });
       this.detailView.readOnly = true;
     }
-    this.detailView.bindState(() => ({ cells: r.cells, calib: r.calib, activeCellId: null }));
+    this.detailView.bindState(() => ({
+      cells: r.cells, fields: r.fields || [], calib: r.calib,
+      activeCellId: null, activeFieldId: null
+    }));
     await this.detailView.loadImage(`/api/reports/${r.id}/file`, r.width, r.height);
     this.detailView.readOnly = true;
     this.detailView.setTool('pan');
+  },
+
+  // 冻结视野统计表 HTML（数字格式与服务端 buildFieldStats 一致）
+  fieldStatsHtml(r) {
+    const stats = r.fieldStats;
+    if (!stats || !stats.fields.length) {
+      return '<p class="hint">该报告无取样视野（旧报告缺少视野时按空列表读取）。</p>';
+    }
+    const cell = (v) => (v === null || v === undefined) ? '待定标' : String(v);
+    const body = stats.fields.map((f) => `
+      <tr>
+        <td>${f.name}</td>
+        <td>${f.holes}</td>
+        <td>${cell(f.netAreaMm2)}</td>
+        <td>${f.cellCount}</td>
+        <td>${f.densityText}</td>
+        <td>${cell(f.countedCellAreaMm2)}</td>
+      </tr>`).join('');
+    return `
+      <table class="measure">
+        <thead><tr>
+          <th>视野</th><th>孔洞</th><th>净面积 mm²</th><th>细胞数</th>
+          <th>密度 个/mm²</th><th>计入细胞净面积 mm²</th>
+        </tr></thead>
+        <tbody>${body}</tbody>
+      </table>
+      <p class="hint">与「视野统计 CSV」为同一份冻结结果；细胞按净区域质心严格落入净区域计入，视野重叠可重复计数，净面积为零的细胞不计入。</p>`;
   },
 
   hideDetail() {
