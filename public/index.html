@@ -71,13 +71,33 @@
         </div>
 
         <div class="panel">
-          <h3>③ 测量结果（草稿）</h3>
+          <h3>③ 取样视野（细胞密度）</h3>
+          <div class="toolbar">
+            <button id="tool-field" class="tool">🔲 画取样视野</button>
+            <button id="tool-fieldhole" class="tool" disabled>🕓 为选中视野画孔洞</button>
+          </div>
+          <p class="hint">圈定命名视野以统计细胞密度：视野由不自交的外环与可选孔洞构成。
+            细胞以其<b>扣除孔洞后的净区域质心</b>归属，质心严格落在视野净区域才计入（边界不计入）；
+            视野可重叠，重叠细胞在各视野分别计数；净面积为零的细胞不计入。</p>
+          <div class="toolbar wrap">
+            <button id="save-fields" class="primary small" disabled>保存全部视野</button>
+          </div>
+          <div id="field-list" class="cell-list"></div>
+        </div>
+
+        <div class="panel">
+          <h3>④ 细胞测量结果（草稿）</h3>
           <div id="measure-table-wrap"></div>
         </div>
 
         <div class="panel">
-          <h3>④ 发布报告</h3>
-          <p class="hint">发布会冻结当时的图片、标尺、轮廓与结果快照；之后修改草稿不影响已发布报告。</p>
+          <h3>⑤ 视野细胞密度统计（草稿）</h3>
+          <div id="field-stats-wrap"></div>
+        </div>
+
+        <div class="panel">
+          <h3>⑥ 发布报告</h3>
+          <p class="hint">发布会冻结当时的图片、标尺、细胞轮廓、<b>取样视野与密度统计</b>；之后修改草稿不影响已发布报告。</p>
           <button id="publish-btn" class="primary wide">发布当前草稿为报告</button>
         </div>
       </aside>
@@ -173,10 +193,15 @@
           <div id="rp-table-wrap"></div>
         </div>
         <div class="panel">
+          <h3>视野细胞密度统计（发布时冻结）</h3>
+          <div id="rp-field-wrap"></div>
+        </div>
+        <div class="panel">
           <h3>导出</h3>
           <div class="toolbar wrap">
             <a id="rp-png-link" class="btn-like" download>标注 PNG</a>
             <a id="rp-csv-link" class="btn-like" download>测量 CSV</a>
+            <a id="rp-field-csv-link" class="btn-like" download>视野统计 CSV</a>
           </div>
         </div>
       </aside>

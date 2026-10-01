@@ -123,10 +123,38 @@ const Reports = {
         <tbody>${rows}</tbody>
       </table>`;
 
+    // 视野细胞密度统计：与视野统计 CSV 取同一冻结 fieldStats
+    const fs = r.fieldStats || [];
+    const fsWrap = document.getElementById('rp-field-wrap');
+    if (!fs.length) {
+      fsWrap.innerHTML = '<p class="hint">本报告发布时未圈定取样视野（旧报告缺少视野按空列表读取）。</p>';
+    } else {
+      const frows = fs.map((s) => `
+        <tr>
+          <td><span style="color:#ffd400">●</span> ${s.name}</td>
+          <td>${s.holes}</td>
+          <td>${s.areaText}</td>
+          <td>${s.cellCount}</td>
+          <td>${s.densityText}</td>
+          <td>${s.countedCellAreaText}</td>
+        </tr>`).join('');
+      fsWrap.innerHTML = `
+        <table class="measure compact">
+          <thead><tr>
+            <th>视野</th><th>孔洞</th><th>净面积 mm²</th><th>细胞数</th>
+            <th>细胞密度 个/mm²</th><th>计入细胞净面积总和 mm²</th>
+          </tr></thead>
+          <tbody>${frows}</tbody>
+        </table>
+        <p class="hint">发布时冻结，不随后续草稿变化；与「视野统计 CSV」为同一份结果。</p>`;
+    }
+
     document.getElementById('rp-png-link').href = API.exportPngUrl(r.id);
     document.getElementById('rp-png-link').setAttribute('download', `${r.id}_annotated.png`);
     document.getElementById('rp-csv-link').href = API.exportCsvUrl(r.id);
     document.getElementById('rp-csv-link').setAttribute('download', `${r.id}_measurements.csv`);
+    document.getElementById('rp-field-csv-link').href = API.exportFieldCsvUrl(r.id);
+    document.getElementById('rp-field-csv-link').setAttribute('download', `${r.id}_fields.csv`);
 
     if (!this.detailView) {
       this.detailView = new CanvasView(document.getElementById('report-canvas'), {
@@ -134,7 +162,7 @@ const Reports = {
       });
       this.detailView.readOnly = true;
     }
-    this.detailView.bindState(() => ({ cells: r.cells, calib: r.calib, activeCellId: null }));
+    this.detailView.bindState(() => ({ cells: r.cells, fields: r.fields || [], calib: r.calib, activeCellId: null }));
     await this.detailView.loadImage(`/api/reports/${r.id}/file`, r.width, r.height);
     this.detailView.readOnly = true;
     this.detailView.setTool('pan');

@@ -145,4 +145,25 @@ function buildComparisonCsv(view) {
   return '﻿' + rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
 }
 
-module.exports = { buildReportCsv, buildCombinedCsv, buildComparisonCsv, streamZip };
+// 取样视野统计 CSV：与报告页表格同一冻结结果（同一组展示文本）。
+// 旧报告缺少视野时 fieldStats 为空列表，仅输出表头。
+function buildFieldStatsCsv(report) {
+  const c = report.calib || {};
+  const rows = [[
+    '报告ID', '报告标题', '图片文件名', '发布时间', '发布时草稿版本',
+    '标定距离(μm)', '每像素微米(μm/px)'
+  ], [
+    report.id, report.title, report.filename, report.createdAt, `v${report.draftVersion}`,
+    c.distanceUm ?? '', c.scale ? round(c.scale, 6) : ''
+  ], []];
+
+  rows.push(['视野名称', '孔洞数', '净面积(mm²)', '细胞数', '细胞密度(个/mm²)', '计入细胞净面积总和(mm²)']);
+  const stats = Array.isArray(report.fieldStats) ? report.fieldStats : [];
+  if (!stats.length) rows.push(['（无取样视野）']);
+  for (const s of stats) {
+    rows.push([s.name, s.holes, s.areaText, s.cellCount, s.densityText, s.countedCellAreaText]);
+  }
+  return '﻿' + rows.map((r) => r.map(csvCell).join(',')).join('\r\n');
+}
+
+module.exports = { buildReportCsv, buildCombinedCsv, buildComparisonCsv, buildFieldStatsCsv, streamZip };

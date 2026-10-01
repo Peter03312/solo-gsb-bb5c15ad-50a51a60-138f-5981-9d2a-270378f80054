@@ -38,6 +38,13 @@ const API = {
       body: JSON.stringify({ version, cells })
     }));
   },
+  async saveFields(id, version, fields) {
+    return jsonOrThrow(await fetch(`/api/images/${id}/fields`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ version, fields })
+    }));
+  },
   async publish(id, version, title) {
     return jsonOrThrow(await fetch(`/api/images/${id}/publish`, {
       method: 'POST',
@@ -52,6 +59,7 @@ const API = {
     return jsonOrThrow(await fetch(`/api/reports/${id}`));
   },
   exportCsvUrl(id) { return `/api/reports/${id}/csv`; },
+  exportFieldCsvUrl(id) { return `/api/reports/${id}/field-csv`; },
   exportPngUrl(id) { return `/api/reports/${id}/png`; },
 
   // ---------- 报告比较 ----------

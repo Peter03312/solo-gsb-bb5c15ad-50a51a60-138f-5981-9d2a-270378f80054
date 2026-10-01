@@ -23,6 +23,7 @@ function initDb(dataDir) {
       version       INTEGER NOT NULL DEFAULT 1,  -- 草稿版本，每次修改 +1
       calib         TEXT,                    -- JSON: {p1:{x,y}, p2:{x,y}, distanceUm, scale}
       cells         TEXT NOT NULL DEFAULT '[]', -- JSON: [{id,name,outer,holes,areaUm2,perimeterUm}]
+      fields        TEXT NOT NULL DEFAULT '[]', -- JSON: [{id,name,outer,holes}] 取样视野（密度统计）
       published     INTEGER NOT NULL DEFAULT 0,
       created_at    TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
@@ -39,6 +40,7 @@ function initDb(dataDir) {
       height        INTEGER NOT NULL,
       calib         TEXT NOT NULL,
       cells         TEXT NOT NULL,
+      fields        TEXT NOT NULL DEFAULT '[]', -- 发布时冻结的取样视野
       created_at    TEXT NOT NULL DEFAULT (datetime('now')),
       FOREIGN KEY (image_id) REFERENCES images(id) ON DELETE CASCADE
     );
@@ -56,6 +58,14 @@ function initDb(dataDir) {
       FOREIGN KEY (retest_report_id) REFERENCES reports(id) ON DELETE CASCADE
     );
   `);
+
+  // 旧版本数据库的幂等升级：缺少 fields 列时补上（旧报告缺少视野按空列表读取）
+  const ensureColumn = (table, column, ddl) => {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all();
+    if (!cols.some((c) => c.name === column)) db.exec(ddl);
+  };
+  ensureColumn('images', 'fields', `ALTER TABLE images ADD COLUMN fields TEXT NOT NULL DEFAULT '[]'`);
+  ensureColumn('reports', 'fields', `ALTER TABLE reports ADD COLUMN fields TEXT NOT NULL DEFAULT '[]'`);
 
   return db;
 }

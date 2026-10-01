@@ -148,6 +148,129 @@ function clientValidate(cells, width, height) {
   return null;
 }
 
+function gPointInsideOrOn(p, poly) {
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    if (gPointOnSegment(p.x, p.y, poly[i].x, poly[i].y, poly[j].x, poly[j].y)) return true;
+  }
+  return gPointStrictlyInside(p, poly);
+}
+
+function gSignedArea(poly) {
+  let s = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    s += a.x * b.y - b.x * a.y;
+  }
+  return s / 2;
+}
+
+function gRingMoments(poly) {
+  let qx = 0, qy = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i], b = poly[(i + 1) % poly.length];
+    const cr = a.x * b.y - b.x * a.y;
+    qx += (a.x + b.x) * cr;
+    qy += (a.y + b.y) * cr;
+  }
+  return { qx: qx / 6, qy: qy / 6 };
+}
+
+// 扣除孔洞后的净区域质心（净面积非正时返回 null；与服务端 netCentroid 同公式）
+function gNetCentroid(outer, holes) {
+  const aOuter = gSignedArea(outer);
+  const m = gRingMoments(outer);
+  let area = aOuter, qx = m.qx, qy = m.qy;
+  for (const h of holes || []) {
+    const ah = gSignedArea(h);
+    const mh = gRingMoments(h);
+    const sign = (aOuter >= 0 ? 1 : -1) * (ah >= 0 ? -1 : 1);
+    area += sign * ah;
+    qx += sign * mh.qx;
+    qy += sign * mh.qy;
+  }
+  if (!(Math.abs(area) > GEOM_EPS)) return null;
+  return { x: qx / area, y: qy / area, areaPx: Math.abs(area) };
+}
+
+// 点是否严格位于视野净区域（严格在外环内，且不在任何孔洞内/边界上）
+function gPointInFieldNet(p, field) {
+  if (!gPointStrictlyInside(p, field.outer)) return false;
+  for (const h of field.holes || []) if (gPointInsideOrOn(p, h)) return false;
+  return true;
+}
+
+// 视野整批即时校验：规则与服务端 validateField 一致（含净面积非正）
+function clientValidateFields(fields, width, height) {
+  for (let i = 0; i < fields.length; i++) {
+    const f = fields[i];
+    const label = f.name ? `视野「${f.name}」` : `第 ${i + 1} 个视野`;
+    const outer = f.outer;
+    if (outer.length < 3) return `${label}：外轮廓至少需要 3 个顶点`;
+    const dup = gDupPoint(outer);
+    if (dup) return `${label}：第 ${dup} 个点重复`;
+    if (outer.some((p) => p.x < 0 || p.y < 0 || p.x > width || p.y > height))
+      return `${label}：存在越出图片范围的顶点`;
+    const si = gSelfIntersection(outer);
+    if (si) return `${label}：第 ${si[0]}、${si[1]} 条边相交/接触，轮廓不得自交`;
+
+    for (let hi = 0; hi < (f.holes || []).length; hi++) {
+      const hole = f.holes[hi];
+      const hl = `${label} 的孔洞 ${hi + 1}`;
+      if (hole.length < 3) return `${hl}：至少需要 3 个顶点`;
+      if (gDupPoint(hole)) return `${hl}：存在重复点`;
+      if (hole.some((p) => p.x < 0 || p.y < 0 || p.x > width || p.y > height))
+        return `${hl}：顶点越出图片范围`;
+      if (gSelfIntersection(hole)) return `${hl}：自交`;
+      if (!gRingStrictlyInside(hole, outer))
+        return `${hl}：必须严格位于视野外轮廓内部，且不得接触外轮廓`;
+    }
+    for (let a = 0; a < (f.holes || []).length; a++) {
+      for (let b = a + 1; b < f.holes.length; b++) {
+        let touch = gPointStrictlyInside(f.holes[b][0], f.holes[a]) ||
+                    gPointStrictlyInside(f.holes[a][0], f.holes[b]);
+        if (!touch) {
+          for (const [p1, p2] of gEdges(f.holes[a])) {
+            for (const [q1, q2] of gEdges(f.holes[b])) {
+              if (gSegsTouch(p1, p2, q1, q2)) { touch = true; break; }
+            }
+            if (touch) break;
+          }
+        }
+        if (touch) return `${label}：孔洞 ${a + 1} 与孔洞 ${b + 1} 相互接触或重叠`;
+      }
+    }
+    const netPx = gArea(outer) - (f.holes || []).reduce((s, h) => s + gArea(h), 0);
+    if (!(netPx > GEOM_EPS)) return `${label}：扣除孔洞后的净面积必须为正`;
+  }
+  return null;
+}
+
+// 全部视野实时统计；scale = μm/px，未定标传 null
+function clientFieldStats(fields, cells, scale) {
+  const centroids = cells.map((c) => {
+    try { return gNetCentroid(c.outer, c.holes); } catch { return null; }
+  });
+  return (fields || []).map((f, fi) => {
+    const counted = [];
+    cells.forEach((cell, ci) => {
+      const ctr = centroids[ci];
+      if (ctr && gPointInFieldNet(ctr, f)) counted.push({ cell, ci, areaPx: ctr.areaPx });
+    });
+    const areaPx = gArea(f.outer) - (f.holes || []).reduce((s, h) => s + gArea(h), 0);
+    const calibrated = typeof scale === 'number' && Number.isFinite(scale) && scale > 0;
+    const areaMm2 = calibrated ? areaPx * scale * scale / 1e6 : null;
+    const countedMm2 = calibrated ? counted.reduce((s, x) => s + x.areaPx, 0) * scale * scale / 1e6 : null;
+    const density = calibrated && areaMm2 > 0 ? counted.length / areaMm2 : null;
+    return {
+      name: (f.name && f.name.trim()) || `视野 ${fi + 1}`,
+      holes: (f.holes || []).length,
+      cellCount: counted.length,
+      areaMm2, countedMm2, density, calibrated,
+      countedCellKeys: counted.map((x) => x.cell.id || `#${x.ci}`)
+    };
+  });
+}
+
 // 实时测量（scale = μm/px）；无定标时返回 null
 function clientMeasure(cells, scale) {
   if (scale == null) return null;
@@ -160,6 +283,8 @@ function clientMeasure(cells, scale) {
 
 window.ClientGeom = {
   clientValidate, clientMeasure,
+  clientValidateFields, clientFieldStats,
   gArea, gPerimeter, gSelfIntersection, gPointStrictlyInside,
-  gRingStrictlyInside, gEdges, gSegsTouch, gDupPoint
+  gRingStrictlyInside, gEdges, gSegsTouch, gDupPoint,
+  gPointInsideOrOn, gNetCentroid, gPointInFieldNet
 };

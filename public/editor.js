@@ -3,6 +3,7 @@
 // 草稿编辑器：定标、细胞/孔洞绘制、校验保存、实时测量、乐观版本发布
 
 const PALETTE = window.CANVAS_COLORS;
+const FIELD_COLOR = '#ffd400';
 
 function fmt(v) {
   if (v === null || v === undefined) return '—';
@@ -11,14 +12,31 @@ function fmt(v) {
   return (Math.round(v * 1000) / 1000).toLocaleString('zh-CN', { maximumFractionDigits: 3 });
 }
 
+// 视野统计表的数值格式（与服务端冻结结果一致：面积 6 位、密度 4 位）
+function fmtMm2(v) {
+  if (v === null || v === undefined || !Number.isFinite(v)) return '待定标';
+  let r = Math.round(v * 1e6) / 1e6;
+  if (Object.is(r, -0)) r = 0;
+  return String(r);
+}
+function fmtDensity(v) {
+  if (v === null || v === undefined || !Number.isFinite(v)) return '待定标';
+  let r = Math.round(v * 1e4) / 1e4;
+  if (Object.is(r, -0)) r = 0;
+  return String(r);
+}
+
 const Editor = {
   imageId: null,
   img: null,           // 服务端草稿
   cells: [],           // 本地工作副本
-  dirty: false,
-  drawing: null,       // {kind:'cell'|'hole', points:[], cellId?}
+  fields: [],          // 取样视野本地工作副本
+  dirty: false,        // 细胞未保存
+  fieldsDirty: false,  // 视野未保存
+  drawing: null,       // {kind:'cell'|'hole'|'field'|'fieldhole', points:[], cellId?/fieldId?}
   calibDraft: null,    // [p1] 等待第二点
   activeCellId: null,
+  activeFieldId: null,
   view: null,
   tool: 'cell',
 
@@ -40,8 +58,10 @@ const Editor = {
       });
       this.view.bindState(() => ({
         cells: this.cells,
+        fields: this.fields,
         drawing: this.drawing,
         activeCellId: this.activeCellId,
+        activeFieldId: this.activeFieldId,
         calib: this.img ? this.img.calib : null,
         calibDraft: this.calibDraft
       }));
@@ -51,14 +71,23 @@ const Editor = {
     this.renderSidebar();
   },
 
-  async applyServerData(data) {
+  // keepCells/keepFields：保存成功后保留对应的本地工作副本（避免互相覆盖未保存修改）
+  async applyServerData(data, keepCells = false, keepFields = false) {
     this.img = data;
-    this.cells = JSON.parse(JSON.stringify(data.cells || []));
-    for (const c of this.cells) if (!c.id) c.id = crypto.randomUUID();
-    this.dirty = false;
+    if (!keepCells) {
+      this.cells = JSON.parse(JSON.stringify(data.cells || []));
+      for (const c of this.cells) if (!c.id) c.id = crypto.randomUUID();
+      this.dirty = false;
+    }
+    if (!keepFields) {
+      this.fields = JSON.parse(JSON.stringify(data.fields || []));
+      for (const f of this.fields) if (!f.id) f.id = crypto.randomUUID();
+      this.fieldsDirty = false;
+    }
     this.drawing = null;
     this.calibDraft = null;
     if (!this.cells.some((c) => c.id === this.activeCellId)) this.activeCellId = null;
+    if (!this.fields.some((f) => f.id === this.activeFieldId)) this.activeFieldId = null;
     if (this.view) this.view.render();
   },
 
@@ -71,10 +100,11 @@ const Editor = {
 
   setTool(t) {
     this.tool = t;
-    for (const id of ['tool-calib', 'tool-cell', 'tool-hole', 'tool-pan']) {
+    for (const id of ['tool-calib', 'tool-cell', 'tool-hole', 'tool-field', 'tool-fieldhole', 'tool-pan']) {
       document.getElementById(id).classList.toggle('active', id === `tool-${t}`);
     }
     document.getElementById('tool-hole').disabled = !this.activeCellId;
+    document.getElementById('tool-fieldhole').disabled = !this.activeFieldId;
     if (this.view) this.view.setTool(t);
   },
 
@@ -83,6 +113,11 @@ const Editor = {
       if (this.tool === 'hole') {
         if (!this.activeCellId) return this.toast('请先在细胞列表中选中一个细胞');
         this.drawing = { kind: 'hole', points: [], cellId: this.activeCellId };
+      } else if (this.tool === 'field') {
+        this.drawing = { kind: 'field', points: [] };
+      } else if (this.tool === 'fieldhole') {
+        if (!this.activeFieldId) return this.toast('请先在视野列表中选中一个视野');
+        this.drawing = { kind: 'fieldhole', points: [], fieldId: this.activeFieldId };
       } else {
         this.drawing = { kind: 'cell', points: [] };
       }
@@ -115,14 +150,14 @@ const Editor = {
     const d = this.drawing;
     if (!d || d.points.length < 3) return this.toast('轮廓至少需要 3 个顶点');
     const pts = d.points;
-    const label = d.kind === 'hole' ? '孔洞' : '细胞外轮廓';
+    const kindLabel = { hole: '孔洞', cell: '细胞外轮廓', field: '视野外轮廓', fieldhole: '视野孔洞' }[d.kind];
 
     const dup = window.ClientGeom.gArea ? this.dupIndex(pts) : null;
-    if (dup) return this.toast(`${label}：第 ${dup} 个点与下一点重复`);
+    if (dup) return this.toast(`${kindLabel}：第 ${dup} 个点与下一点重复`);
     if (pts.some((p) => p.x < 0 || p.y < 0 || p.x > this.img.width || p.y > this.img.height))
-      return this.toast(`${label}：存在越出图片范围的顶点`);
+      return this.toast(`${kindLabel}：存在越出图片范围的顶点`);
     const si = window.ClientGeom.gSelfIntersection(pts);
-    if (si) return this.toast(`${label}：第 ${si[0]}、${si[1]} 条边相交或接触，轮廓不得自交`);
+    if (si) return this.toast(`${kindLabel}：第 ${si[0]}、${si[1]} 条边相交或接触，轮廓不得自交`);
 
     if (d.kind === 'cell') {
       const cell = {
@@ -134,6 +169,31 @@ const Editor = {
       };
       this.cells.push(cell);
       this.activeCellId = cell.id;
+    } else if (d.kind === 'field') {
+      if (!(window.ClientGeom.gArea(pts) > 1e-9))
+        return this.toast('视野外轮廓围成的面积必须为正');
+      const field = {
+        id: crypto.randomUUID(),
+        name: `视野 ${this.fields.length + 1}`,
+        outer: pts,
+        holes: []
+      };
+      this.fields.push(field);
+      this.activeFieldId = field.id;
+      this.fieldsDirty = true;
+    } else if (d.kind === 'fieldhole') {
+      const field = this.fields.find((f) => f.id === d.fieldId);
+      if (!field) { this.drawing = null; return this.toast('所属视野已不存在'); }
+      if (!window.ClientGeom.gPointStrictlyInside(pts[0], field.outer) ||
+          !window.ClientGeom.gRingStrictlyInside(pts, field.outer)) {
+        return this.toast('视野孔洞必须严格位于视野外轮廓内部，且不能与外轮廓接触');
+      }
+      for (let i = 0; i < field.holes.length; i++) {
+        if (this.ringsTouch(pts, field.holes[i]))
+          return this.toast(`视野孔洞与已有孔洞 ${i + 1} 接触或重叠，孔洞之间必须留有间隙`);
+      }
+      field.holes.push(pts);
+      this.fieldsDirty = true;
     } else {
       const cell = this.cells.find((c) => c.id === d.cellId);
       if (!cell) { this.drawing = null; return this.toast('所属细胞已不存在'); }
@@ -147,9 +207,10 @@ const Editor = {
       }
       cell.holes.push(pts);
     }
+    if (d.kind === 'cell' || d.kind === 'hole') this.dirty = true;
     this.drawing = null;
-    this.dirty = true;
     document.getElementById('tool-hole').disabled = false;
+    document.getElementById('tool-fieldhole').disabled = false;
     this.renderSidebar();
     this.view.render();
   },
@@ -231,9 +292,29 @@ const Editor = {
     try {
       const payload = this.cells.map((c) => ({ id: c.id, name: c.name, outer: c.outer, holes: c.holes }));
       const updated = await API.saveContours(this.imageId, this.img.version, payload);
-      await this.applyServerData(updated);
+      // 保留本地未保存的视野工作副本；细胞轮廓变动后视野统计在渲染时按新轮廓重算
+      await this.applyServerData(updated, false, true);
       this.renderSidebar();
-      this.toast('轮廓已保存，测量值已按当前标尺计算', true);
+      this.toast('轮廓已保存，测量值与视野细胞密度已按当前轮廓与标尺重算', true);
+    } catch (e) {
+      if (e.status === 409) return this.handleConflict(e);
+      this.toast(e.message);
+    }
+  },
+
+  // ---------- 保存视野（整批原子；与轮廓/定标共用同一草稿版本） ----------
+
+  async saveFields() {
+    if (!this.fields.length) return this.toast('还没有任何取样视野');
+    const err = window.ClientGeom.clientValidateFields(this.fields, this.img.width, this.img.height);
+    if (err) return this.toast(err);
+    try {
+      const payload = this.fields.map((f) => ({ id: f.id, name: f.name, outer: f.outer, holes: f.holes }));
+      const updated = await API.saveFields(this.imageId, this.img.version, payload);
+      // 保留本地未保存的细胞工作副本
+      await this.applyServerData(updated, true, false);
+      this.renderSidebar();
+      this.toast('视野已保存，细胞密度统计已按当前轮廓与标尺计算', true);
     } catch (e) {
       if (e.status === 409) return this.handleConflict(e);
       this.toast(e.message);
@@ -255,6 +336,7 @@ const Editor = {
     if (!this.img.calib) return this.toast('请先完成标尺定标');
     if (!this.cells.length) return this.toast('请至少圈出一个细胞外轮廓');
     if (this.dirty) return this.toast('有未保存的轮廓修改，请先点击「保存全部轮廓」再发布');
+    if (this.fieldsDirty) return this.toast('有未保存的视野修改，请先点击「保存全部视野」再发布');
     const title = prompt('报告标题：', `${this.img.filename.replace(/\.[^.]+$/, '')} 报告`);
     if (title === null) return;
     try {
@@ -298,10 +380,40 @@ const Editor = {
     this.renderSidebar();
   },
 
+  // ---------- 视野增删改 ----------
+
+  deleteField(id) {
+    if (!confirm('删除该取样视野及其全部孔洞？')) return;
+    this.fields = this.fields.filter((f) => f.id !== id);
+    if (this.activeFieldId === id) this.activeFieldId = this.fields[0] ? this.fields[0].id : null;
+    this.fieldsDirty = true;
+    this.renderSidebar();
+    this.view.render();
+  },
+
+  deleteFieldHole(fieldId, idx) {
+    const field = this.fields.find((f) => f.id === fieldId);
+    field.holes.splice(idx, 1);
+    this.fieldsDirty = true;
+    this.renderSidebar();
+    this.view.render();
+  },
+
+  renameField(id, name) {
+    const field = this.fields.find((f) => f.id === id);
+    if (field) { field.name = name; this.fieldsDirty = true; }
+  },
+
+  selectField(id) {
+    this.activeFieldId = id;
+    this.renderSidebar();
+  },
+
   renderDraftInfo() {
     const el = document.getElementById('draft-info');
     if (this.drawing) {
-      const kind = this.drawing.kind === 'hole' ? '孔洞（红色）' : '细胞外轮廓';
+      const kindMap = { hole: '细胞孔洞（红色）', cell: '细胞外轮廓', field: '视野外轮廓（黄色）', fieldhole: '视野孔洞（黄色）' };
+      const kind = kindMap[this.drawing.kind];
       el.innerHTML = `正在绘制<b>${kind}</b>：已放置 ${this.drawing.points.length} 个点（至少 3 个，双击或回车完成）`;
     } else if (this.calibDraft) {
       el.innerHTML = `正在放置<b>定标点</b>：已选 ${this.calibDraft.length}/2 点`;
@@ -312,8 +424,8 @@ const Editor = {
 
   renderSidebar() {
     document.getElementById('ed-title').textContent = this.img.filename;
-    document.getElementById('ed-version').textContent =
-      `草稿 v${this.img.version}${this.dirty ? ' · 有未保存修改' : ''}`;
+    const dirtyTxt = (this.dirty ? ' · 轮廓有未保存修改' : '') + (this.fieldsDirty ? ' · 视野有未保存修改' : '');
+    document.getElementById('ed-version').textContent = `草稿 v${this.img.version}${dirtyTxt}`;
 
     // 定标信息
     const c = this.img.calib;
@@ -386,6 +498,85 @@ const Editor = {
       }
     });
 
+    // 视野列表
+    const fieldList = document.getElementById('field-list');
+    fieldList.innerHTML = '';
+    if (!this.fields.length) {
+      fieldList.innerHTML = '<p class="hint">还没有取样视野。选择「画取样视野」工具开始圈定统计范围。</p>';
+    }
+    this.fields.forEach((field, i) => {
+      const row = document.createElement('div');
+      row.className = 'cell-row' + (field.id === this.activeFieldId ? ' active' : '');
+      const sw = document.createElement('span');
+      sw.className = 'swatch';
+      sw.style.background = FIELD_COLOR;
+      row.appendChild(sw);
+
+      const inp = document.createElement('input');
+      inp.className = 'name-edit';
+      inp.value = field.name || '';
+      inp.addEventListener('change', () => this.renameField(field.id, inp.value));
+      inp.addEventListener('focus', () => this.selectField(field.id));
+      row.appendChild(inp);
+
+      const holes = document.createElement('button');
+      holes.textContent = `🕓 孔洞 ${field.holes.length}`;
+      holes.title = '为该视野画孔洞';
+      holes.onclick = () => {
+        this.selectField(field.id);
+        this.setTool('fieldhole');
+      };
+      row.appendChild(holes);
+
+      const del = document.createElement('button');
+      del.textContent = '删除';
+      del.onclick = () => this.deleteField(field.id);
+      row.appendChild(del);
+
+      fieldList.appendChild(row);
+
+      field.holes.forEach((h, hi) => {
+        const sub = document.createElement('div');
+        sub.className = 'cell-row';
+        sub.style.marginLeft = '26px';
+        sub.innerHTML = `<span class="sub2">🕳 视野孔洞 ${hi + 1}（${h.length} 点）</span>`;
+        const hd = document.createElement('button');
+        hd.textContent = '删';
+        hd.onclick = () => this.deleteFieldHole(field.id, hi);
+        sub.appendChild(hd);
+        fieldList.appendChild(sub);
+      });
+    });
+
+    // 视野细胞密度统计（实时；细胞轮廓/视野变动或重定标后自动重算）
+    const fieldStats = window.ClientGeom.clientFieldStats(this.fields, this.cells, c ? c.scale : null);
+    const fsWrap = document.getElementById('field-stats-wrap');
+    if (!this.fields.length) {
+      fsWrap.innerHTML = '<p class="hint">尚无取样视野。圈定并保存视野后，这里按细胞净区域质心统计各视野的细胞密度。</p>';
+    } else {
+      const rows = fieldStats.map((s, i) => `
+        <tr>
+          <td><span style="color:${FIELD_COLOR}">●</span> ${s.name}${this.fieldsDirty ? ' *' : ''}</td>
+          <td>${s.holes}</td>
+          <td>${fmtMm2(s.areaMm2)}</td>
+          <td>${s.cellCount}</td>
+          <td>${fmtDensity(s.density)}</td>
+          <td>${fmtMm2(s.countedMm2)}</td>
+        </tr>`).join('');
+      fsWrap.innerHTML = `
+        <table class="measure compact">
+          <thead><tr>
+            <th>视野</th><th>孔洞</th><th>净面积 mm²</th><th>细胞数</th>
+            <th>细胞密度 个/mm²</th><th>计入细胞净面积总和 mm²</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+        <p class="hint">归属规则：细胞以其扣除孔洞后的净区域质心判定，质心严格落在视野净区域才计入，
+        边界不计入；视野可重叠，重叠处细胞在各视野<b>分别计数</b>；净面积为零的细胞不计入。
+        ${this.fieldsDirty ? '* 为未保存的实时统计，保存后以服务端结果为准。' : ''}
+        ${c ? '' : '当前<b>未定标</b>：面积与密度显示“待定标”，视野与细胞数保留。'}</p>`;
+    }
+
     // 测量表
     const wrap = document.getElementById('measure-table-wrap');
     if (!c) {
@@ -409,7 +600,9 @@ const Editor = {
     }
 
     document.getElementById('save-contours').disabled = !this.dirty;
+    document.getElementById('save-fields').disabled = !this.fieldsDirty;
     document.getElementById('tool-hole').disabled = !this.activeCellId;
+    document.getElementById('tool-fieldhole').disabled = !this.activeFieldId;
     this.renderDraftInfo();
   },
 
@@ -442,12 +635,18 @@ const Editor = {
       if (!this.activeCellId && this.cells.length) this.activeCellId = this.cells[0].id;
       this.setTool('hole');
     };
+    document.getElementById('tool-field').onclick = () => this.setTool('field');
+    document.getElementById('tool-fieldhole').onclick = () => {
+      if (!this.activeFieldId && this.fields.length) this.activeFieldId = this.fields[0].id;
+      this.setTool('fieldhole');
+    };
     document.getElementById('tool-pan').onclick = () => this.setTool('pan');
     document.getElementById('fit-view').onclick = () => this.view && this.view.fit();
     document.getElementById('finish-ring').onclick = () => this.finishRing();
     document.getElementById('undo-point').onclick = () => this.undoPoint();
     document.getElementById('cancel-ring').onclick = () => this.cancelRing();
     document.getElementById('save-contours').onclick = () => this.saveAll();
+    document.getElementById('save-fields').onclick = () => this.saveFields();
     document.getElementById('publish-btn').onclick = () => this.publish();
   }
 };

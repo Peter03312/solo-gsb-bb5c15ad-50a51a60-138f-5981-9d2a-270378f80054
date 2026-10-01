@@ -137,7 +137,7 @@ class CanvasView {
       this.cb.onCalibPoint && this.cb.onCalibPoint(pt);
       return;
     }
-    if (this.tool === 'cell' || this.tool === 'hole') {
+    if (this.tool === 'cell' || this.tool === 'hole' || this.tool === 'field' || this.tool === 'fieldhole') {
       const st = this.getState();
       const ring = st.drawing;
       // 点击靠近起点且已有 3 点：闭合完成，不新增重复点
@@ -177,7 +177,7 @@ class CanvasView {
 
   onDblClick(e) {
     if (this.readOnly) return;
-    if (this.tool !== 'cell' && this.tool !== 'hole') return;
+    if (this.tool !== 'cell' && this.tool !== 'hole' && this.tool !== 'field' && this.tool !== 'fieldhole') return;
     const st = this.getState();
     if (st.drawing && st.drawing.points.length >= 3) {
       e.preventDefault();
@@ -211,6 +211,10 @@ class CanvasView {
 
     const st = this.getState();
     const cells = st.cells || [];
+    // 取样视野（黄色）画在细胞之下作为底图
+    const fields = st.fields || [];
+    fields.forEach((field, i) => this.drawField(ctx, field, i, fields.length, st.activeFieldId));
+
     cells.forEach((cell, i) => this.drawPolygon(ctx, cell.outer, {
       fill: CELL_COLORS[i % CELL_COLORS.length],
       width: 2.5 / this.k,
@@ -225,8 +229,9 @@ class CanvasView {
 
     // 正在绘制的环
     if (st.drawing) {
-      const isHole = st.drawing.kind === 'hole';
-      this.drawDraftRing(ctx, st.drawing.points, isHole ? '#ff1744' : '#00ff9c');
+      const isHole = st.drawing.kind === 'hole' || st.drawing.kind === 'fieldhole';
+      const isField = st.drawing.kind === 'field' || st.drawing.kind === 'fieldhole';
+      this.drawDraftRing(ctx, st.drawing.points, isField ? '#ffd400' : (isHole ? '#ff1744' : '#00ff9c'));
     }
 
     // 标尺：优先显示正在放置的草稿点，否则显示已保存标定
@@ -262,6 +267,41 @@ class CanvasView {
         ctx.beginPath(); ctx.arc(p.x, p.y, r, 0, Math.PI * 2); ctx.fill();
       }
     }
+  }
+
+  drawField(ctx, field, index, total, active) {
+    // 半透明黄色底，让视野净区域一眼可辨；孔洞保持透出底色
+    this.drawPolygon(ctx, field.outer, {
+      fill: '#ffd400', stroke: '#ffd400', width: (active ? 3.6 : 2.2) / this.k
+    });
+    (field.holes || []).forEach((h) => {
+      // 用底色填充挖空感（画在图像之上、细胞之下），再画黄色虚线边界
+      ctx.beginPath();
+      ctx.moveTo(h[0].x, h[0].y);
+      for (let i = 1; i < h.length; i++) ctx.lineTo(h[i].x, h[i].y);
+      ctx.closePath();
+      ctx.fillStyle = 'rgba(20,24,28,0.55)';
+      ctx.fill();
+      this.drawPolygon(ctx, h, {
+        stroke: '#ffd400', dash: [7 / this.k, 5 / this.k], width: 1.8 / this.k, fill: null
+      });
+    });
+    // 视野名标签：外环顶点平均位置（仅作标注锚点，不参与统计）
+    let ax = 0, ay = 0;
+    for (const p of field.outer) { ax += p.x; ay += p.y; }
+    ax /= field.outer.length; ay /= field.outer.length;
+    const name = (field.name && field.name.trim()) || `视野 ${index + 1}`;
+    const fs = 13 / this.k;
+    ctx.font = `bold ${fs}px sans-serif`;
+    const tw = ctx.measureText(name).width;
+    ctx.fillStyle = 'rgba(20,24,28,0.72)';
+    ctx.fillRect(ax - tw / 2 - 5 / this.k, ay - fs - 4 / this.k, tw + 10 / this.k, fs + 8 / this.k);
+    ctx.fillStyle = '#ffd400';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.fillText(name, ax, ay - fs / 2 + 1 / this.k);
+    ctx.textAlign = 'start';
+    ctx.textBaseline = 'alphabetic';
   }
 
   drawDraftRing(ctx, pts, color) {

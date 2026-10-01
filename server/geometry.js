@@ -118,6 +118,59 @@ function pointStrictlyInside(p, poly) {
   return inside;
 }
 
+// 点是否在多边形内部或边界上
+function pointInsideOrOn(p, poly) {
+  for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+    if (pointOnSegment(p.x, p.y, poly[i].x, poly[i].y, poly[j].x, poly[j].y)) return true;
+  }
+  return pointStrictlyInside(p, poly);
+}
+
+// 有向鞋带面积（保留符号；顶点序 CCW 为正）
+function signedArea(poly) {
+  let s = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % poly.length];
+    s += a.x * b.y - b.x * a.y;
+  }
+  return s / 2;
+}
+
+// 环关于 y 轴 / x 轴的一阶矩 Qx=∫∫x dA、Qy=∫∫y dA（随顶点序带符号）
+function ringMoments(poly) {
+  let qx = 0, qy = 0;
+  for (let i = 0; i < poly.length; i++) {
+    const a = poly[i];
+    const b = poly[(i + 1) % poly.length];
+    const cross2 = a.x * b.y - b.x * a.y;
+    qx += (a.x + b.x) * cross2;
+    qy += (a.y + b.y) * cross2;
+  }
+  return { qx: qx / 6, qy: qy / 6 };
+}
+
+// 扣除孔洞后的净区域质心。外环与孔洞均可按任意顶点序给出（孔洞面积为绝对值扣除）。
+// 净面积非正时返回 null（调用方据此把该细胞排除）。
+function netCentroid(outer, holes) {
+  const aOuter = signedArea(outer);
+  const mOuter = ringMoments(outer);
+  let netArea = aOuter;
+  let qx = mOuter.qx;
+  let qy = mOuter.qy;
+  for (const h of holes || []) {
+    const ah = signedArea(h);
+    const mh = ringMoments(h);
+    // 孔洞按“挖去其绝对面积”处理：与外环同向的孔需翻转其矩的符号
+    const sign = (aOuter >= 0 ? 1 : -1) * (ah >= 0 ? -1 : 1);
+    netArea += sign * ah;
+    qx += sign * mh.qx;
+    qy += sign * mh.qy;
+  }
+  if (!(Math.abs(netArea) > EPS)) return null;
+  return { x: qx / netArea, y: qy / netArea, areaPx: Math.abs(netArea) };
+}
+
 // 多边形 hole 是否严格位于 poly 内部：
 // 所有顶点严格在内，且两环的任何边互不接触
 function ringStrictlyInside(hole, poly) {
@@ -164,11 +217,11 @@ function perimeter(poly) {
   return p;
 }
 
-// 校验一个细胞：外轮廓合法、孔洞合法且彼此不接触。
-// 返回 {outer, holes}（已标准化）；不合法抛出带细胞名的 Error。
-function validateCell(cell, width, height) {
-  const label = cell.name ? `细胞「${cell.name}」` : `第 ${cell._seq} 个细胞`;
-  const outer = parsePoints(cell.outer, `${label} 的外轮廓`);
+// 通用校验：一个不自交的外环 + 若干严格位于其内部、彼此不接触的孔洞。
+// label 由调用方构造（如：细胞「名」/ 第 N 个细胞 / 视野「名」/ 第 N 个视野）。
+// 返回 {outer, holes}（已标准化）；不合法抛出带 label 的 Error。
+function validateCompoundRing(rawOuter, rawHoles, width, height, label) {
+  const outer = parsePoints(rawOuter, `${label} 的外轮廓`);
 
   const dup = duplicateConsecutivePoint(outer);
   if (dup) throw new Error(`${label}：外轮廓第 ${dup} 个点与下一点重复`);
@@ -183,8 +236,8 @@ function validateCell(cell, width, height) {
   const hit = selfIntersection(outer);
   if (hit) throw new Error(`${label}：外轮廓第 ${hit.edge[0]}、${hit.edge[1]} 条边${hit.where}，轮廓不得自交`);
 
-  if (!Array.isArray(cell.holes)) cell.holes = [];
-  const holes = cell.holes.map((h, hi) => parsePoints(h, `${label} 的孔洞 ${hi + 1}`));
+  const rawHoleList = Array.isArray(rawHoles) ? rawHoles : [];
+  const holes = rawHoleList.map((h, hi) => parsePoints(h, `${label} 的孔洞 ${hi + 1}`));
 
   holes.forEach((hole, hi) => {
     const hlabel = `${label} 的孔洞 ${hi + 1}`;
@@ -198,11 +251,11 @@ function validateCell(cell, width, height) {
     if (si) throw new Error(`${hlabel}：第 ${si.edge[0]}、${si.edge[1]} 条边${si.where}，孔洞不得自交`);
 
     if (!ringStrictlyInside(hole, outer)) {
-      throw new Error(`${hlabel}：必须严格位于所属细胞外轮廓内部，且不能与外轮廓接触`);
+      throw new Error(`${hlabel}：必须严格位于所属外轮廓内部，且不能与外轮廓接触`);
     }
   });
 
-  // 同细胞内的孔洞彼此不得接触（边界也不许），也不允许包含关系下的边接触；
+  // 各孔洞彼此不得接触（边界也不许），也不允许包含关系下的重叠；
   // 边互不接触 + 顶点严格在内的组合足以排除重叠/接触。
   for (let i = 0; i < holes.length; i++) {
     for (let j = i + 1; j < holes.length; j++) {
@@ -228,6 +281,24 @@ function validateCell(cell, width, height) {
   return { outer, holes };
 }
 
+// 校验一个细胞：外轮廓合法、孔洞合法且彼此不接触。
+function validateCell(cell, width, height) {
+  const label = cell.name ? `细胞「${cell.name}」` : `第 ${cell._seq} 个细胞`;
+  return validateCompoundRing(cell.outer, cell.holes, width, height, label);
+}
+
+// 校验一个取样视野：规则与细胞一致（越界/自交/孔洞严格在内/孔洞互不接触），
+// 另外扣除孔洞后的净面积必须为正。
+function validateField(field, width, height, seq) {
+  const label = field.name ? `视野「${field.name}」` : `第 ${seq} 个视野`;
+  const { outer, holes } = validateCompoundRing(field.outer, field.holes, width, height, label);
+  const netArea = shoelaceArea(outer) - holes.reduce((s, h) => s + shoelaceArea(h), 0);
+  if (!(netArea > EPS)) {
+    throw new Error(`${label}：扣除孔洞后的净面积为 ${netArea}，必须为正数（退化为线/点的视野不合法），整批视野保存不生效`);
+  }
+  return { outer, holes };
+}
+
 // scale: 每像素对应的微米数
 function measureCell(outer, holes, scale) {
   const areaPx = shoelaceArea(outer) - holes.reduce((s, h) => s + shoelaceArea(h), 0);
@@ -240,9 +311,15 @@ function measureCell(outer, holes, scale) {
 
 module.exports = {
   parsePoints,
+  validateCompoundRing,
   validateCell,
+  validateField,
   measureCell,
   shoelaceArea,
+  signedArea,
   perimeter,
-  ringStrictlyInside
+  ringStrictlyInside,
+  pointStrictlyInside,
+  pointInsideOrOn,
+  netCentroid
 };

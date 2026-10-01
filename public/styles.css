@@ -152,6 +152,11 @@ table.measure th { background: var(--panel2); color: var(--muted); font-weight: 
 table.measure td:first-child, table.measure th:first-child { text-align: left; }
 table.measure tr:nth-child(even) td { background: rgba(255,255,255,.02); }
 
+/* 视野密度统计：6 列在窄侧栏内可横向滚动，字号略紧凑 */
+#field-stats-wrap, #rp-field-wrap { overflow-x: auto; }
+table.measure.compact { font-size: 11px; white-space: nowrap; }
+table.measure.compact th, table.measure.compact td { padding: 4px 6px; }
+
 /* 复选框列表项 */
 .item label.main { display: flex; align-items: center; gap: 14px; flex: 1; cursor: pointer; min-width: 0; }
 .item input[type=checkbox] { transform: scale(1.25); }
